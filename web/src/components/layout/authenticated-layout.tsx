@@ -1,6 +1,7 @@
 import { useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Outlet, useNavigate } from '@tanstack/react-router'
+import { isAdminBillingPaused } from '@/lib/admin-billing-state'
 import { getCookie } from '@/lib/cookies'
 import { cn } from '@/lib/utils'
 import { LayoutProvider } from '@/context/layout-provider'
@@ -43,6 +44,14 @@ export function AuthenticatedLayout({
             )}
           >
             <AppHeader actions={headerActions} />
+            {isAdminBillingPaused() ? (
+              <div
+                role='status'
+                className='mx-4 mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-950 md:mx-6 dark:text-amber-100'
+              >
+                账单统计已临时暂停；业务调用和用量记录继续保留。
+              </div>
+            ) : null}
             <GuideGate />
             {children ?? <Outlet />}
           </SidebarInset>

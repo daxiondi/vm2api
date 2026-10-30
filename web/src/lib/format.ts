@@ -1,3 +1,5 @@
+import { isAdminBillingPaused } from '@/lib/admin-billing-state'
+
 export function pct(value: unknown): number {
   if (value == null) return 0
   const n = Number(value)
@@ -40,6 +42,7 @@ export function fmtNum(n: unknown): string {
 }
 
 export function fmtUsd(n: unknown, digits?: number): string {
+  if (isAdminBillingPaused()) return '—'
   const v = Number(n)
   if (!Number.isFinite(v) || v === 0) return '$0'
   const d = digits ?? (Math.abs(v) >= 100 ? 2 : Math.abs(v) >= 1 ? 3 : 4)

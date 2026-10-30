@@ -1,5 +1,37 @@
-import { describe, expect, it } from 'vitest'
-import { fmtTok, pct, remainPct, usedPctOf } from '@/lib/format'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { fmtTok, fmtUsd, pct, remainPct, usedPctOf } from '@/lib/format'
+
+afterEach(() => vi.unstubAllGlobals())
+
+describe('fmtUsd', () => {
+  it('preserves existing dollar formatting when billing is active', () => {
+    expect(fmtUsd(0)).toBe('$0')
+    expect(fmtUsd(null)).toBe('$0')
+    expect(fmtUsd(undefined)).toBe('$0')
+    expect(fmtUsd(100)).toBe('$100.00')
+    expect(fmtUsd(1.234)).toBe('$1.234')
+    expect(fmtUsd(0.12345)).toBe('$0.1235')
+    expect(fmtUsd(1.234, 2)).toBe('$1.23')
+  })
+
+  it.each([0, null, undefined, 123.45, Number.NaN])(
+    'shows unavailable instead of a dollar amount while paused: %s',
+    (value) => {
+      vi.stubGlobal('__VM2API_ADMIN_BILLING_PAUSED__', true)
+      expect(fmtUsd(value)).toBe('—')
+      expect(fmtUsd(value, 2)).toBe('—')
+    }
+  )
+
+  it('restores dollar formatting after billing resumes', () => {
+    vi.stubGlobal('__VM2API_ADMIN_BILLING_PAUSED__', true)
+    expect(fmtUsd(0)).toBe('—')
+
+    vi.stubGlobal('__VM2API_ADMIN_BILLING_PAUSED__', false)
+    expect(fmtUsd(0)).toBe('$0')
+    expect(fmtUsd(12.5)).toBe('$12.500')
+  })
+})
 
 describe('usedPctOf', () => {
   it('prefers Codex used_percent and does not scale it', () => {

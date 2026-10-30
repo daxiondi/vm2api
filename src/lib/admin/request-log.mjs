@@ -673,7 +673,12 @@ export class RequestLogStore {
     return this.repo.aggregate(opts)
   }
 
+  _adminBillingPaused() {
+    return fs.existsSync(path.join(this.dataDir, 'admin-billing-paused'))
+  }
+
   totals() {
+    if (this._adminBillingPaused()) return null
     return this.repo.totals()
   }
 
@@ -682,22 +687,27 @@ export class RequestLogStore {
   }
 
   billingStats(opts = {}) {
+    if (this._adminBillingPaused()) return null
     return this.repo.billingStats(opts)
   }
 
   ownerBilling(opts = {}) {
+    if (this._adminBillingPaused()) return null
     return this.repo.ownerBilling(opts)
   }
 
   costByModel(opts = {}) {
+    if (this._adminBillingPaused()) return []
     return this.repo.costByModel(opts)
   }
 
   vmUsageStats(opts = {}) {
+    if (this._adminBillingPaused()) return null
     return this.repo.vmUsageStats(opts)
   }
 
   keyUsageStats(opts = {}) {
+    if (this._adminBillingPaused()) return null
     return this.repo.keyUsageStats(opts)
   }
 

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { VIEW_TITLES } from '@/config/nav'
+import { isAdminBillingPaused } from '@/lib/admin-billing-state'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import type { VmKind } from '@/lib/vm-kind'
 import { useVmIndex } from '@/hooks/use-vm-index'
@@ -26,6 +27,18 @@ import { emptyTotals, splitBilling } from './split'
 type PlatformFilter = 'all' | VmKind
 
 export function BillingPage() {
+  if (isAdminBillingPaused()) {
+    return (
+      <PageHeader title={VIEW_TITLES.billing} description='账单统计已临时暂停'>
+        <EmptyState reason='业务调用和用量记录继续保留；费用统计暂停期间不显示金额。' />
+      </PageHeader>
+    )
+  }
+
+  return <ActiveBillingPage />
+}
+
+function ActiveBillingPage() {
   const [groupBy, setGroupBy] = useState<'vm' | 'key'>('vm')
   const [platform, setPlatform] = useState<PlatformFilter>('all')
   const q = useQuery(billingQueryOptions(groupBy))
