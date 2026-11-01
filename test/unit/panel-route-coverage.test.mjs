@@ -47,6 +47,7 @@ const PANEL_ROUTE_SAMPLES = [
   ['POST', '/api/panel/vms/vm-01/live-migration/prepare'],
   ['GET', '/api/panel/vms/vm-01/live-migration'],
   ['POST', '/api/panel/vms/vm-01/live-migration/upload'],
+  ['POST', '/api/panel/vms/vm-01/live-migration/finalize'],
   ['POST', '/api/panel/vms/vm-01/cooldown/clear'],
   ['POST', '/api/panel/vms/vm-01/circuit/reset'],
   ['GET', '/api/panel/vms/vm-01/diagnose'],

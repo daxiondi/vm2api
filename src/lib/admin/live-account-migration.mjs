@@ -9,6 +9,8 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{1
 const VM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/
 const SHA256 = /^[a-f0-9]{64}$/
 const REQUIRED = ['access_token', 'refresh_token', 'id_token', 'expires_at', 'chatgpt_account_id']
+const LIVE_JOB_STATES = new Set(['awaiting_upload', 'receiving', 'uploaded', 'committing', 'activating',
+  'ready', 'failed', 'expired', 'interrupted'])
 
 export class LiveAccountMigrationError extends Error {
   constructor(code, status = 409) {
@@ -47,6 +49,7 @@ function publicState(state) {
     ...(state.upload_sha256 ? { upload_sha256: state.upload_sha256 } : {}),
     ...(state.stage_sha256 ? { stage_sha256: state.stage_sha256, stage_bytes: state.stage_bytes } : {}),
     ...(state.live_status ? { live_status: state.live_status } : {}),
+    ...(state.finalized_at ? { finalized_at: state.finalized_at } : {}),
     ...(state.error_code ? { error_code: state.error_code } : {}) })
 }
 
@@ -60,9 +63,11 @@ function readState(projectRoot, vmId) {
   }
   let value
   try { value = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { fail('live_migration_state_invalid', 503) }
+  const finalized = value?.status === 'finalized'
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1
     || value.vm_id !== vmId || !UUID.test(value.migration_id || '') || !SHA256.test(value.token_hash || '')
-    || !safeText(value.token, 128) || !SHA256.test(value.source_sha256 || '')) fail('live_migration_state_invalid', 503)
+    || finalized && value.token !== undefined || !finalized && !safeText(value.token, 128)
+    || !SHA256.test(value.source_sha256 || '')) fail('live_migration_state_invalid', 503)
   return value
 }
 
@@ -207,5 +212,52 @@ export function createLiveAccountMigration({ projectRoot, getVm, readAccounts, s
     }
   }
 
-  return Object.freeze({ prepare, status, upload })
+  async function finalize(vmId, input, { signal } = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+      || Object.keys(input).sort().join(',') !== 'live_job_id,migration_id'
+      || !UUID.test(input.migration_id || '') || !UUID.test(input.live_job_id || '')) fail('live_migration_invalid_request', 400)
+    const state = readState(projectRoot, vmId)
+    if (!state || state.migration_id !== input.migration_id || state.live_job_id !== input.live_job_id) {
+      fail('live_migration_not_found', 404)
+    }
+    if (state.status === 'finalized') return publicState(state)
+    if (state.status !== 'uploaded') fail('live_migration_conflict')
+    const { envelope } = preflight({ vmId, getVm, readAccounts, stickyRouter, poolScheduler })
+    if (envelope.sha256 !== state.source_sha256 || state.upload_sha256 !== state.source_sha256) {
+      fail('live_migration_source_changed')
+    }
+    const url = LIVE_MIGRATION_ORIGIN + '/api/account-migrations/' + state.live_job_id + '/status'
+    try {
+      const timeout = AbortSignal.timeout(30000)
+      const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+      const response = await fetchFn(url, { method: 'GET', redirect: 'manual', signal: combined,
+        headers: { authorization: 'Bearer ' + state.token, accept: 'application/json' } })
+      if (response.status >= 300 && response.status < 400) fail('live_migration_redirect_refused', 502)
+      const contentType = String(response.headers.get('content-type') || '')
+      const raw = await readResponse(response)
+      let value
+      try { value = JSON.parse(raw) } catch { fail('live_migration_response_invalid', 502) }
+      const data = value?.data
+      if (response.status !== 200 || !/^application\/json(?:;|$)/i.test(contentType) || value?.ok !== true
+        || data?.jobId !== state.live_job_id || data?.sourceId !== vmId || !LIVE_JOB_STATES.has(data?.status)
+        || data?.uploadSha256 !== state.upload_sha256 || data?.stageSha256 !== state.stage_sha256
+        || data?.stageBytes !== state.stage_bytes) fail('live_migration_response_invalid', 502)
+      state.live_status = data.status; state.updated_at = new Date(clock()).toISOString()
+      if (data.status !== 'ready') {
+        state.error_code = data.status === 'failed' && typeof data.errorCode === 'string'
+          && /^[a-z0-9_]{1,96}$/.test(data.errorCode) ? data.errorCode : 'live_migration_not_ready'
+        writeState(projectRoot, vmId, state)
+        fail('live_migration_not_ready')
+      }
+      state.status = 'finalized'; state.finalized_at = new Date(clock()).toISOString(); state.error_code = null
+      delete state.token
+      writeState(projectRoot, vmId, state)
+      return publicState(state)
+    } catch (error) {
+      if (error instanceof LiveAccountMigrationError) throw error
+      throw new LiveAccountMigrationError('live_migration_status_failed', 502)
+    }
+  }
+
+  return Object.freeze({ prepare, status, upload, finalize })
 }

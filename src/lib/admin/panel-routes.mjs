@@ -3247,6 +3247,17 @@ export function createPanelHandler(ctx) {
             panel.ok(await accountMigration().upload(id, body, { signal: req.signal }))))
         } catch (error) { return migrationError(res, error) }
       }
+      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/live-migration\/finalize$/.test(p)) {
+        const id = p.split('/')[4]
+        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
+        let body
+        try { body = await readBody(req, 4096) }
+        catch (error) { throw error }
+        try {
+          return await withVmLock(vmPath, async () => json(res, 200,
+            panel.ok(await accountMigration().finalize(id, body, { signal: req.signal }))))
+        } catch (error) { return migrationError(res, error) }
+      }
 
       // POST /api/panel/vms/:id/schedulable — sub2api-style schedule toggle
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/schedulable$/.test(p)) {
