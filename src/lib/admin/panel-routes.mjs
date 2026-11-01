@@ -617,7 +617,7 @@ export function createPanelHandler(ctx) {
     poolScheduler: ctx.poolScheduler,
     fetchFn: ctx.fetchFn || fetch,
   }))
-  queueMicrotask(() => {
+  if (typeof cfg?.paths?.project === 'string' && path.isAbsolute(cfg.paths.project)) queueMicrotask(() => {
     accountMigration().reconcileUploaded().then(result => {
       console.log(JSON.stringify({ event: 'live_account_migration_reconciled', ...result }))
     }).catch(error => {

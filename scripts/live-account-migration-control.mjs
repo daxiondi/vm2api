@@ -8,7 +8,8 @@ import { pathToFileURL } from 'node:url'
 const VM_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 const HASH = /^[a-f0-9]{64}$/
-const ACTIONS = new Set(['inspect', 'drain', 'prepare', 'status', 'upload', 'finalize'])
+const ACTIONS = new Set(['inspect', 'begin-drain', 'drain-status', 'stop-drained', 'drain',
+  'prepare', 'status', 'upload', 'finalize'])
 const SAFE_MIGRATION = ['migration_id', 'vm_id', 'status', 'token_hash', 'source_sha256', 'created_at', 'updated_at',
   'expires_at', 'live_job_id', 'upload_sha256', 'stage_sha256', 'stage_bytes', 'live_status', 'finalized_at', 'error_code']
 
@@ -66,14 +67,17 @@ function openSticky(projectRoot) {
 export function localState(projectRoot, vmId) {
   const vm = privateJSON(path.join(projectRoot, 'vms', vmId + '.json'))
   if (vm.id !== vmId) fail('control_vm_invalid')
-  const db = openSticky(projectRoot)
-  let sticky
+  const db = openSticky(projectRoot), now = Date.now()
+  let row
   try {
-    sticky = Number(db.prepare('SELECT count(*) AS n FROM sticky_sessions WHERE vm_id=? AND expires_at>?')
-      .get(vmId, Date.now()).n) || 0
+    row = db.prepare('SELECT count(*) AS n,min(expires_at) AS first_exp,max(expires_at) AS last_exp,sum(hits) AS hits FROM sticky_sessions WHERE vm_id=? AND expires_at>?')
+      .get(vmId, now)
   } finally { db.close() }
   return { vmId, status: vm.status, schedulable: vm.schedulable !== false,
-    disabledReason: vm.schedule_disabled_reason || null, inflight: Number(vm?.policy?.inflight) || 0, sticky }
+    disabledReason: vm.schedule_disabled_reason || null, inflight: Number(vm?.policy?.inflight) || 0,
+    sticky: Number(row?.n) || 0, stickyHits: Number(row?.hits) || 0,
+    firstStickyExpiresAt: Number(row?.first_exp) > now ? new Date(Number(row.first_exp)).toISOString() : null,
+    lastStickyExpiresAt: Number(row?.last_exp) > now ? new Date(Number(row.last_exp)).toISOString() : null }
 }
 
 async function panel(pathname, { method = 'GET', value, fetchFn = fetch, env = process.env } = {}) {
@@ -102,30 +106,38 @@ export async function runControl(input, { projectRoot = process.env.KIN_PROJECT_
   fetchFn = fetch, env = process.env, sleepFn = wait } = {}) {
   const { action, vmId, migrationId, liveJobId } = Array.isArray(input) ? parseArgs(input) : input
   if (!VM_ID.test(vmId || '') || !ACTIONS.has(action)) fail('control_argument_invalid')
-  if (action === 'inspect') return localState(projectRoot, vmId)
-  if (action === 'drain') {
+  if (action === 'inspect' || action === 'drain-status') return localState(projectRoot, vmId)
+  const beginDrain = async () => {
     let current = localState(projectRoot, vmId)
-    if (current.sticky || current.inflight) fail('control_vm_busy')
     if (current.status === 'stopped' && current.schedulable === false) return current
-    await panel(`/api/panel/vms/${encodeURIComponent(vmId)}/schedulable`, {
-      method: 'POST', value: { schedulable: false, reason: 'live_migration' }, fetchFn, env,
-    })
-    const deadline = Date.now() + 60000
-    while (true) {
+    if (current.schedulable === false && current.disabledReason !== 'live_migration') fail('control_vm_not_schedulable')
+    if (current.schedulable) {
+      await panel(`/api/panel/vms/${encodeURIComponent(vmId)}/schedulable`, {
+        method: 'POST', value: { schedulable: false, reason: 'live_migration' }, fetchFn, env,
+      })
       current = localState(projectRoot, vmId)
-      if (!current.sticky && !current.inflight) break
-      if (Date.now() >= deadline) {
-        await panel(`/api/panel/vms/${encodeURIComponent(vmId)}/schedulable`, {
-          method: 'POST', value: { schedulable: true }, fetchFn, env,
-        }).catch(() => {})
-        fail('control_drain_timeout')
-      }
-      await sleepFn(250)
     }
+    if (current.status !== 'running' || current.schedulable || current.disabledReason !== 'live_migration') {
+      fail('control_drain_unproven')
+    }
+    return current
+  }
+  const stopDrained = async () => {
+    let current = localState(projectRoot, vmId)
+    if (current.status === 'stopped' && current.schedulable === false) return current
+    if (current.schedulable || current.disabledReason !== 'live_migration') fail('control_drain_not_started')
+    if (current.sticky || current.inflight) fail('control_vm_busy')
     await panel(`/api/panel/vms/${encodeURIComponent(vmId)}/stop`, { method: 'POST', value: {}, fetchFn, env })
     current = localState(projectRoot, vmId)
     if (current.status !== 'stopped' || current.schedulable || current.sticky || current.inflight) fail('control_stop_unproven')
     return current
+  }
+  if (action === 'begin-drain') return beginDrain()
+  if (action === 'stop-drained') return stopDrained()
+  if (action === 'drain') {
+    const current = await beginDrain()
+    if (current.sticky || current.inflight) fail('control_vm_busy')
+    return stopDrained()
   }
   if (action === 'prepare') {
     return projectMigration(await panel(`/api/panel/vms/${encodeURIComponent(vmId)}/live-migration/prepare`, {

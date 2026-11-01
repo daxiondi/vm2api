@@ -27,10 +27,15 @@ import { effectiveOpenAIPolicy, evaluateOpenAIQuotaGate, normalizeOpenAIQuotaPol
 // `stopped` is leftover Claude docker lifecycle. Codex kernel is independent.
 const HARD_UNAVAILABLE = new Set(['dead', 'error', 'disabled'])
 
-export function isCodexSlotReady(vm, now = Date.now()) {
+function isLiveMigrationDrain(vm) {
+  return vm?.schedulable === false && vm?.schedule_disabled_reason === 'live_migration'
+}
+
+export function isCodexSlotReady(vm, now = Date.now(), { allowMigrationDrain = false } = {}) {
   if (!vm || !isCodexVm(vm)) return false
   if (proxyBlockedReason(vm.proxy)) return false
-  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return false
+  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)
+    && !(allowMigrationDrain && isLiveMigrationDrain(vm))) return false
   if (!vm.has_token) return false
   // An expired access token with no refresh token can never succeed: the
   // kernel has nothing to rotate and every hop answers 401.
@@ -95,7 +100,9 @@ function parkUntil(vm, now) {
  * Ready slots first (lowest 5h/7d stress), parked slots last so a
  * total-exhaust pool still has somewhere to fail instead of 503.
  */
-export function pickCodexSlots(vms, { pin = null, now = Date.now(), quotaPolicy = null, model = null } = {}) {
+export function pickCodexSlots(vms, {
+  pin = null, boundVmId = null, now = Date.now(), quotaPolicy = null, model = null,
+} = {}) {
   const list = Array.isArray(vms) ? vms : []
   if (pin) {
     const vm = list.find((item) => item?.id === pin) || null
@@ -109,7 +116,8 @@ export function pickCodexSlots(vms, { pin = null, now = Date.now(), quotaPolicy 
   const resting = []
   let restUntil = null
   for (const vm of list) {
-    if (!isCodexSlotReady(vm, now)) continue
+    const migrationHome = !!boundVmId && vm.id === boundVmId && isLiveMigrationDrain(vm)
+    if (!isCodexSlotReady(vm, now, { allowMigrationDrain: migrationHome })) continue
     // Operator rest window: not even a parked fallback — the slot is off-shift.
     const rest = evaluateActiveHours(activeHoursOf(vm), now, vm.timezone)
     if (!rest.active) {
@@ -171,10 +179,11 @@ function quotaResetAt(vm) {
   return Math.min(...resets)
 }
 
-export function codexAccountStatus(vm, now = Date.now(), policy = null) {
+export function codexAccountStatus(vm, now = Date.now(), policy = null, { allowMigrationDrain = false } = {}) {
   if (!vm || !isCodexVm(vm)) return 'error'
   if (proxyBlockedReason(vm.proxy)) return 'disabled'
-  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return 'disabled'
+  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)
+    && !(allowMigrationDrain && isLiveMigrationDrain(vm))) return 'disabled'
   const status = String(vm.status || '').toLowerCase()
   if (status === 'disabled') return 'disabled'
   if (status === 'dead' || status === 'error') return 'error'
@@ -190,7 +199,8 @@ export function codexSlotAllowsModel(vm, model) {
   return modelMatchesAllowlist(model, vm?.allowed_models ?? vm?.policy?.allowed_models)
 }
 
-export function codexAccountCandidate(vm, now = Date.now(), signals = null, policy = null) {
+export function codexAccountCandidate(vm, now = Date.now(), signals = null, policy = null,
+  { allowMigrationDrain = false } = {}) {
   const runtime = signals || openAIRuntimeSignals(vm?.id, now)
   const effective = effectiveOpenAIPolicy(vm, normalizeOpenAIQuotaPolicy(policy))
   return {
@@ -201,7 +211,8 @@ export function codexAccountCandidate(vm, now = Date.now(), signals = null, poli
     maxSessions: effective.max_sessions,
     rpmCount: runtime.rpmCount || 0,
     rpmResetAt: runtime.rpmResetAt ?? null,
-    status: codexAccountStatus(vm, now, policy),
+    status: codexAccountStatus(vm, now, policy, { allowMigrationDrain }),
+    draining: allowMigrationDrain && isLiveMigrationDrain(vm),
     inFlight: runtime.inFlight || 0,
     lastStartedAt: runtime.lastStartedAt ?? null,
     quotaResetAt: quotaResetAt(vm),
@@ -244,7 +255,7 @@ export function orderCodexSessionSlots(
   const list = Array.isArray(vms) ? vms : []
   const byId = new Map(list.map((vm) => [vm.id, vm]))
   const policy = normalizeOpenAIQuotaPolicy(quotaPolicy)
-  const found = pickCodexSlots(vms, { pin, now, quotaPolicy: policy, model })
+  const found = pickCodexSlots(vms, { pin, boundVmId, now, quotaPolicy: policy, model })
   const boundResting = !!boundVmId && (found.resting || []).includes(boundVmId)
   const picked = found.error ? found : withModelAllowed(found, byId, model)
   if (picked.error) {
@@ -258,13 +269,14 @@ export function orderCodexSessionSlots(
       ...picked,
       ids: pool,
       sticky: false,
-      candidates: pool.map((id) => codexAccountCandidate(byId.get(id), now, null, policy)),
+      candidates: pool.map((id) => codexAccountCandidate(byId.get(id), now, null, policy,
+        { allowMigrationDrain: id === boundVmId })),
     }
   }
-  const home =
-    boundVmId && pool.includes(boundVmId) && codexAccountStatus(byId.get(boundVmId), now, policy) === 'normal'
-      ? boundVmId
-      : null
+  const home = boundVmId && pool.includes(boundVmId)
+    && codexAccountStatus(byId.get(boundVmId), now, policy, { allowMigrationDrain: true }) === 'normal'
+    ? boundVmId
+    : null
   const boundState = boundVmId
     ? home
       ? 'live'
@@ -286,7 +298,8 @@ export function orderCodexSessionSlots(
     return { error: 'session_window_full', ids: [], ready: [], parked: [], sticky: false, boundState, candidates: [] }
   }
   const cursor = roundRobinCursor == null ? readOpenAICursor() : roundRobinCursor
-  const candidates = ids.map((id) => codexAccountCandidate(byId.get(id), now, null, policy))
+  const candidates = ids.map((id) => codexAccountCandidate(byId.get(id), now, null, policy,
+    { allowMigrationDrain: id === boundVmId }))
   const ordered = orderOpenAIAccounts(candidates, {
     strategy,
     now,
@@ -296,7 +309,8 @@ export function orderCodexSessionSlots(
     roundRobinCursor: cursor,
   })
   if (!ordered.ids.length) {
-    const statuses = ids.map((id) => codexAccountStatus(byId.get(id), now, policy))
+    const statuses = ids.map((id) => codexAccountStatus(byId.get(id), now, policy,
+      { allowMigrationDrain: id === boundVmId }))
     const quotaExhausted = statuses.length > 0 && statuses.every((status) => status === 'quota_exhausted')
     const retryAt = quotaExhausted ? null : rpmRetryAt(candidates, now) || holdRetryAt(candidates, now)
     return {

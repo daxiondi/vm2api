@@ -239,6 +239,61 @@ test('a bound OpenAI session stays on its VM and a full window is skipped', () =
   assert.deepEqual(orderCodexSessionSlots(seatsOnly, { sessionKey: 'conv-z', sessionLimit: sessions }).ids, ['vm-a'])
 })
 
+test('live migration drain excludes fresh sessions but preserves a healthy bound GPT home', () => {
+  const draining = gpt('vm-drain', { schedulable: false, schedule_disabled_reason: 'live_migration' })
+  const open = gpt('vm-open')
+  const fresh = orderCodexSessionSlots([draining, open], { sessionKey: 'fresh-session', roundRobinCursor: 0 })
+  assert.deepEqual(fresh.ids, ['vm-open'])
+  assert.equal(fresh.candidates.some(candidate => candidate.id === 'vm-drain'), false)
+
+  const bound = orderCodexSessionSlots([draining, open], {
+    boundVmId: 'vm-drain', sessionKey: 'bound-session', roundRobinCursor: 0,
+  })
+  assert.equal(bound.boundState, 'live')
+  assert.equal(bound.sticky, true)
+  assert.equal(bound.ids[0], 'vm-drain')
+  assert.equal(bound.candidates.find(candidate => candidate.id === 'vm-drain')?.draining, true)
+})
+
+test('migration affinity never bypasses operator disable, expired credentials, model gates or quota', () => {
+  const open = gpt('vm-open')
+  const disabled = gpt('vm-disabled', { schedulable: false, schedule_disabled_reason: 'disabled' })
+  const generic = orderCodexSessionSlots([disabled, open], { boundVmId: 'vm-disabled', sessionKey: 's1' })
+  assert.equal(generic.boundState, 'gone')
+  assert.deepEqual(generic.ids, ['vm-open'])
+
+  const now = Date.parse('2026-11-01T00:00:00.000Z')
+  const expired = gpt('vm-expired', {
+    schedulable: false, schedule_disabled_reason: 'live_migration',
+    expires_at: Math.floor((now - 1000) / 1000), has_refresh: false,
+  })
+  const noCredential = orderCodexSessionSlots([expired, open], {
+    boundVmId: 'vm-expired', sessionKey: 's2', now,
+  })
+  assert.equal(noCredential.boundState, 'gone')
+  assert.deepEqual(noCredential.ids, ['vm-open'])
+
+  const wrongModel = gpt('vm-model', {
+    schedulable: false, schedule_disabled_reason: 'live_migration', allowed_models: ['gpt-other'],
+  })
+  const gated = orderCodexSessionSlots([wrongModel, open], {
+    boundVmId: 'vm-model', sessionKey: 's3', model: 'gpt-target', now,
+  })
+  assert.equal(gated.boundState, 'gone')
+  assert.deepEqual(gated.ids, ['vm-open'])
+
+  const spent = gpt('vm-spent', {
+    schedulable: false, schedule_disabled_reason: 'live_migration', utilization_5h: 1,
+    reset_5h: new Date(now + 60_000).toISOString(),
+    codex_limited_until: new Date(now + 60_000).toISOString(),
+  })
+  const quota = orderCodexSessionSlots([spent, open], {
+    boundVmId: 'vm-spent', sessionKey: 's4', now,
+  })
+  assert.equal(quota.boundState, 'gone')
+  assert.deepEqual(quota.ids, ['vm-open'])
+})
+
 test('panel max_concurrency on the listVms summary is the candidate cap (#150)', async () => {
   const { codexAccountCandidate } = await import('../../src/lib/pool/codex-slot-pool.mjs')
   const signals = { inFlight: 0 }

@@ -17,7 +17,7 @@ function fixture(t) {
   const writeVm = value => { fs.writeFileSync(vmFile, JSON.stringify(value), { mode: 0o600 }); fs.chmodSync(vmFile, 0o600) }
   writeVm({ id: 'vm-01', status: 'running', schedulable: true, policy: { inflight: 0 } })
   const db = new DatabaseSync(path.join(root, 'data', 'kin.db'))
-  db.exec('CREATE TABLE sticky_sessions(key TEXT PRIMARY KEY,vm_id TEXT,expires_at INTEGER)')
+  db.exec('CREATE TABLE sticky_sessions(key TEXT PRIMARY KEY,vm_id TEXT,expires_at INTEGER,hits INTEGER NOT NULL DEFAULT 0)')
   db.close()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   return { root, vmFile, writeVm }
@@ -37,28 +37,58 @@ test('arguments and migration projection accept only bounded safe identifiers', 
     { migration_id: MIGRATION, vm_id: 'vm-01', token_hash: 'a'.repeat(64), status: 'prepared' })
 })
 
-test('drain refuses sticky state and otherwise proves the stopped unschedulable source', async t => {
+test('staged drain stops new placement, preserves sticky state and stops only after it expires', async t => {
   const f = fixture(t), db = new DatabaseSync(path.join(f.root, 'data', 'kin.db'))
-  db.prepare('INSERT INTO sticky_sessions VALUES (?,?,?)').run('session-one', 'vm-01', Date.now() + 60000); db.close()
-  await assert.rejects(runControl({ action: 'drain', vmId: 'vm-01' }, {
-    projectRoot: f.root, env: { KIN_API_KEY: 'x'.repeat(64) }, fetchFn: async () => response({}),
-  }), { code: 'control_vm_busy' })
+  const expires = Date.now() + 60000
+  db.prepare('INSERT INTO sticky_sessions(key,vm_id,expires_at,hits) VALUES (?,?,?,?)')
+    .run('session-one', 'vm-01', expires, 3)
+  db.close()
+  const calls = [], fetchFn = async (url, init) => {
+    calls.push([new URL(url).pathname, init.method, init.body ? JSON.parse(init.body) : null])
+    if (url.endsWith('/schedulable')) f.writeVm({ id: 'vm-01', status: 'running', schedulable: false,
+      schedule_disabled_reason: 'live_migration', policy: { inflight: 0 } })
+    if (url.endsWith('/stop')) f.writeVm({ id: 'vm-01', status: 'stopped', schedulable: false,
+      schedule_disabled_reason: 'stopped', policy: { inflight: 0 } })
+    return response({})
+  }
+  const options = { projectRoot: f.root, env: { KIN_API_KEY: 'x'.repeat(64) }, fetchFn }
+  const begun = await runControl({ action: 'begin-drain', vmId: 'vm-01' }, options)
+  assert.equal(begun.status, 'running')
+  assert.equal(begun.schedulable, false)
+  assert.equal(begun.disabledReason, 'live_migration')
+  assert.equal(begun.sticky, 1)
+  assert.equal(begun.stickyHits, 3)
+  assert.match(begun.lastStickyExpiresAt, /^\d{4}-\d{2}-\d{2}T/)
+  assert.deepEqual(calls.map(value => value[0]), ['/api/panel/vms/vm-01/schedulable'])
+  assert.equal((await runControl({ action: 'drain-status', vmId: 'vm-01' }, options)).sticky, 1)
+  await assert.rejects(runControl({ action: 'stop-drained', vmId: 'vm-01' }, options),
+    { code: 'control_vm_busy' })
   const clear = new DatabaseSync(path.join(f.root, 'data', 'kin.db')); clear.exec('DELETE FROM sticky_sessions'); clear.close()
-  const calls = []
-  const result = await runControl({ action: 'drain', vmId: 'vm-01' }, {
-    projectRoot: f.root, env: { KIN_API_KEY: 'x'.repeat(64) },
+  const stopped = await runControl({ action: 'stop-drained', vmId: 'vm-01' }, options)
+  assert.deepEqual(stopped, { vmId: 'vm-01', status: 'stopped', schedulable: false,
+    disabledReason: 'stopped', inflight: 0, sticky: 0, stickyHits: 0,
+    firstStickyExpiresAt: null, lastStickyExpiresAt: null })
+  assert.deepEqual(calls.map(value => value[0]), ['/api/panel/vms/vm-01/schedulable', '/api/panel/vms/vm-01/stop'])
+})
+
+test('zero-session drain remains an atomic convenience and refuses unrelated disables', async t => {
+  const f = fixture(t), calls = []
+  const options = { projectRoot: f.root, env: { KIN_API_KEY: 'x'.repeat(64) },
     fetchFn: async (url, init) => {
-      calls.push([new URL(url).pathname, init.method, init.body ? JSON.parse(init.body) : null])
+      calls.push(new URL(url).pathname)
       if (url.endsWith('/schedulable')) f.writeVm({ id: 'vm-01', status: 'running', schedulable: false,
         schedule_disabled_reason: 'live_migration', policy: { inflight: 0 } })
       if (url.endsWith('/stop')) f.writeVm({ id: 'vm-01', status: 'stopped', schedulable: false,
         schedule_disabled_reason: 'stopped', policy: { inflight: 0 } })
       return response({})
-    }, sleepFn: async () => {},
-  })
-  assert.deepEqual(result, { vmId: 'vm-01', status: 'stopped', schedulable: false,
-    disabledReason: 'stopped', inflight: 0, sticky: 0 })
-  assert.deepEqual(calls.map(value => value[0]), ['/api/panel/vms/vm-01/schedulable', '/api/panel/vms/vm-01/stop'])
+    } }
+  const stopped = await runControl({ action: 'drain', vmId: 'vm-01' }, options)
+  assert.equal(stopped.status, 'stopped')
+  assert.deepEqual(calls, ['/api/panel/vms/vm-01/schedulable', '/api/panel/vms/vm-01/stop'])
+  f.writeVm({ id: 'vm-01', status: 'running', schedulable: false,
+    schedule_disabled_reason: 'disabled', policy: { inflight: 0 } })
+  await assert.rejects(runControl({ action: 'begin-drain', vmId: 'vm-01' }, options),
+    { code: 'control_vm_not_schedulable' })
 })
 
 test('prepare upload and finalize call only fixed local panel routes and never expose the API key', async t => {
