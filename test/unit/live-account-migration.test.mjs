@@ -132,6 +132,20 @@ test('finalize verifies Live readiness, removes the one-time token and is idempo
   assert.equal(uploaded.upload_sha256, finalized.upload_sha256)
 })
 
+test('finalize seals a Live terminal failure, preserves the safe code and removes the one-time token', async t => {
+  const f = fixture(t, { liveStatus: 'failed' }), prepared = f.manager.prepare('vm-02')
+  await f.manager.upload('vm-02', { migration_id: prepared.migration_id, live_job_id: JOB })
+  const failed = await f.manager.finalize('vm-02', { migration_id: prepared.migration_id, live_job_id: JOB })
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.live_status, 'failed')
+  assert.equal(failed.error_code, 'activation_model_failed')
+  assert.match(failed.terminal_at, /^\d{4}-\d{2}-\d{2}T/)
+  const state = JSON.parse(fs.readFileSync(path.join(f.root, 'data/live-migrations/vm-02.json')))
+  assert.equal(Object.hasOwn(state, 'token'), false)
+  assert.equal(state.token_hash, sha(TOKEN))
+  assert.equal(f.manager.status('vm-02').status, 'failed')
+})
+
 test('finalize keeps a stopped source recoverable until Live reports ready', async t => {
   const f = fixture(t, { liveStatus: 'activating' }), prepared = f.manager.prepare('vm-02')
   await f.manager.upload('vm-02', { migration_id: prepared.migration_id, live_job_id: JOB })
@@ -155,6 +169,16 @@ test('startup reconciliation finalizes uploaded jobs once and skips terminal sta
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'data/live-migrations/vm-02.json'))).token, undefined)
   const second = await f.manager.reconcileUploaded()
   assert.deepEqual(second, { scanned: 1, uploaded: 0, finalized: 0, pending: 0, failed: 0, items: [] })
+})
+
+test('startup reconciliation seals terminal Live failures and counts them once', async t => {
+  const f = fixture(t, { liveStatus: 'failed' }), prepared = f.manager.prepare('vm-02')
+  await f.manager.upload('vm-02', { migration_id: prepared.migration_id, live_job_id: JOB })
+  const result = await f.manager.reconcileUploaded()
+  assert.deepEqual(result, { scanned: 1, uploaded: 1, finalized: 0, pending: 0, failed: 1,
+    items: [{ vm_id: 'vm-02', status: 'failed', live_status: 'failed', error_code: 'activation_model_failed' }] })
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'data/live-migrations/vm-02.json'))).token, undefined)
+  assert.equal((await f.manager.reconcileUploaded()).uploaded, 0)
 })
 
 test('startup reconciliation leaves not-ready jobs stopped and retryable', async t => {

@@ -50,6 +50,7 @@ function publicState(state) {
     ...(state.stage_sha256 ? { stage_sha256: state.stage_sha256, stage_bytes: state.stage_bytes } : {}),
     ...(state.live_status ? { live_status: state.live_status } : {}),
     ...(state.finalized_at ? { finalized_at: state.finalized_at } : {}),
+    ...(state.terminal_at ? { terminal_at: state.terminal_at } : {}),
     ...(state.error_code ? { error_code: state.error_code } : {}) })
 }
 
@@ -63,10 +64,11 @@ function readState(projectRoot, vmId) {
   }
   let value
   try { value = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { fail('live_migration_state_invalid', 503) }
-  const finalized = value?.status === 'finalized'
+  const sealed = value?.status === 'finalized'
+    || value?.status === 'failed' && typeof value.terminal_at === 'string'
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1
     || value.vm_id !== vmId || !UUID.test(value.migration_id || '') || !SHA256.test(value.token_hash || '')
-    || finalized && value.token !== undefined || !finalized && !safeText(value.token, 128)
+    || sealed && value.token !== undefined || !sealed && !safeText(value.token, 128)
     || !SHA256.test(value.source_sha256 || '')) fail('live_migration_state_invalid', 503)
   return value
 }
@@ -243,9 +245,17 @@ export function createLiveAccountMigration({ projectRoot, getVm, readAccounts, s
         || data?.uploadSha256 !== state.upload_sha256 || data?.stageSha256 !== state.stage_sha256
         || data?.stageBytes !== state.stage_bytes) fail('live_migration_response_invalid', 502)
       state.live_status = data.status; state.updated_at = new Date(clock()).toISOString()
+      if (data.status === 'failed') {
+        state.status = 'failed'
+        state.error_code = typeof data.errorCode === 'string' && /^[a-z0-9_]{1,96}$/.test(data.errorCode)
+          ? data.errorCode : 'live_migration_live_failed'
+        state.terminal_at = state.updated_at
+        delete state.token
+        writeState(projectRoot, vmId, state)
+        return publicState(state)
+      }
       if (data.status !== 'ready') {
-        state.error_code = data.status === 'failed' && typeof data.errorCode === 'string'
-          && /^[a-z0-9_]{1,96}$/.test(data.errorCode) ? data.errorCode : 'live_migration_not_ready'
+        state.error_code = 'live_migration_not_ready'
         writeState(projectRoot, vmId, state)
         fail('live_migration_not_ready')
       }
@@ -279,8 +289,10 @@ export function createLiveAccountMigration({ projectRoot, getVm, readAccounts, s
       result.uploaded++
       try {
         const value = await finalize(vmId, { migration_id: state.migration_id, live_job_id: state.live_job_id }, { signal })
-        result.finalized++
-        result.items.push({ vm_id: vmId, status: value.status, live_status: value.live_status })
+        if (value.status === 'finalized') result.finalized++
+        else if (value.status === 'failed') result.failed++
+        result.items.push({ vm_id: vmId, status: value.status, live_status: value.live_status,
+          ...(value.error_code ? { error_code: value.error_code } : {}) })
       } catch (error) {
         const code = error instanceof LiveAccountMigrationError ? error.code : 'live_migration_status_failed'
         if (code === 'live_migration_not_ready') result.pending++
