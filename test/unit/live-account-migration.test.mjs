@@ -146,6 +146,28 @@ test('finalize keeps a stopped source recoverable until Live reports ready', asy
   assert.equal((await f.manager.finalize('vm-02', { migration_id: prepared.migration_id, live_job_id: JOB })).status, 'finalized')
 })
 
+test('startup reconciliation finalizes uploaded jobs once and skips terminal state', async t => {
+  const f = fixture(t), prepared = f.manager.prepare('vm-02')
+  await f.manager.upload('vm-02', { migration_id: prepared.migration_id, live_job_id: JOB })
+  const first = await f.manager.reconcileUploaded()
+  assert.deepEqual(first, { scanned: 1, uploaded: 1, finalized: 1, pending: 0, failed: 0,
+    items: [{ vm_id: 'vm-02', status: 'finalized', live_status: 'ready' }] })
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'data/live-migrations/vm-02.json'))).token, undefined)
+  const second = await f.manager.reconcileUploaded()
+  assert.deepEqual(second, { scanned: 1, uploaded: 0, finalized: 0, pending: 0, failed: 0, items: [] })
+})
+
+test('startup reconciliation leaves not-ready jobs stopped and retryable', async t => {
+  const f = fixture(t, { liveStatus: 'activating' }), prepared = f.manager.prepare('vm-02')
+  await f.manager.upload('vm-02', { migration_id: prepared.migration_id, live_job_id: JOB })
+  const result = await f.manager.reconcileUploaded()
+  assert.equal(result.pending, 1)
+  assert.equal(result.finalized, 0)
+  assert.equal(f.manager.status('vm-02').status, 'uploaded')
+  f.setLiveStatus('ready')
+  assert.equal((await f.manager.reconcileUploaded()).finalized, 1)
+})
+
 test('source mutation, redirect and invalid Live receipt fail closed without a replay path', async t => {
   const changed = fixture(t), prepared = changed.manager.prepare('vm-02')
   changed.setAccounts([account('other')])

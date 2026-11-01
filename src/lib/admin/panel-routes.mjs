@@ -617,6 +617,14 @@ export function createPanelHandler(ctx) {
     poolScheduler: ctx.poolScheduler,
     fetchFn: ctx.fetchFn || fetch,
   }))
+  queueMicrotask(() => {
+    accountMigration().reconcileUploaded().then(result => {
+      console.log(JSON.stringify({ event: 'live_account_migration_reconciled', ...result }))
+    }).catch(error => {
+      const code = error instanceof LiveAccountMigrationError ? error.code : 'live_migration_status_failed'
+      console.error(JSON.stringify({ event: 'live_account_migration_reconcile_failed', error_code: code }))
+    })
+  })
   const migrationError = (res, error) => {
     const code = error instanceof LiveAccountMigrationError ? error.code : 'live_migration_failed'
     const status = error instanceof LiveAccountMigrationError ? error.status : 503

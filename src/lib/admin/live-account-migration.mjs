@@ -259,5 +259,37 @@ export function createLiveAccountMigration({ projectRoot, getVm, readAccounts, s
     }
   }
 
-  return Object.freeze({ prepare, status, upload, finalize })
+  async function reconcileUploaded({ signal } = {}) {
+    const directory = privateDirectory(projectRoot)
+    const names = fs.readdirSync(directory, { withFileTypes: true })
+      .filter(entry => entry.isFile() && entry.name.endsWith('.json') && VM_ID.test(entry.name.slice(0, -5)))
+      .map(entry => entry.name.slice(0, -5)).sort()
+    if (names.length > 1000) fail('live_migration_state_unsafe', 503)
+    const result = { scanned: names.length, uploaded: 0, finalized: 0, pending: 0, failed: 0, items: [] }
+    for (const vmId of names) {
+      if (signal?.aborted) fail('live_migration_cancelled', 499)
+      let state
+      try { state = readState(projectRoot, vmId) }
+      catch (error) {
+        result.failed++
+        result.items.push({ vm_id: vmId, status: 'failed', error_code: error?.code || 'live_migration_state_invalid' })
+        continue
+      }
+      if (state.status !== 'uploaded') continue
+      result.uploaded++
+      try {
+        const value = await finalize(vmId, { migration_id: state.migration_id, live_job_id: state.live_job_id }, { signal })
+        result.finalized++
+        result.items.push({ vm_id: vmId, status: value.status, live_status: value.live_status })
+      } catch (error) {
+        const code = error instanceof LiveAccountMigrationError ? error.code : 'live_migration_status_failed'
+        if (code === 'live_migration_not_ready') result.pending++
+        else result.failed++
+        result.items.push({ vm_id: vmId, status: 'uploaded', error_code: code })
+      }
+    }
+    return result
+  }
+
+  return Object.freeze({ prepare, status, upload, finalize, reconcileUploaded })
 }
