@@ -100,6 +100,7 @@ import { publicEndpointView, fetchUpstreamModels, API_ENDPOINT_PRESETS } from '.
 import { runAnthropicConsole, resolveConsoleProxyUrl, savedEndpointKey } from './anthropic-console.mjs'
 import { publicUserView } from './panel-users.mjs'
 import { authorizePanelRoute, mePayload, panelIdentity } from './panel-acl.mjs'
+import { createLiveAccountMigration, LiveAccountMigrationError } from './live-account-migration.mjs'
 import {
   denyIfUserCannotDeleteVm,
   denyIfUserMissesKey,
@@ -607,6 +608,20 @@ export function createPanelHandler(ctx) {
   const routingConfigPath = ctx.routingConfigPath
   const stickyRouter = ctx.stickyRouter
   const accountQuota = ctx.accountQuota
+  let liveAccountMigration
+  const accountMigration = () => liveAccountMigration || (liveAccountMigration = createLiveAccountMigration({
+    projectRoot: cfg.paths.project,
+    getVm: id => getVm(cfg.paths.project, id),
+    readAccounts: id => readCodexAccounts(cfg.paths.project, id),
+    stickyRouter,
+    poolScheduler: ctx.poolScheduler,
+    fetchFn: ctx.fetchFn || fetch,
+  }))
+  const migrationError = (res, error) => {
+    const code = error instanceof LiveAccountMigrationError ? error.code : 'live_migration_failed'
+    const status = error instanceof LiveAccountMigrationError ? error.status : 503
+    return json(res, status, { ok: false, error: { code, message: code } })
+  }
   const proxyPool = ctx.proxyPool
   const apiKeyStore = ctx.apiKeyStore
   const apiEndpointStore = ctx.apiEndpointStore
@@ -3202,6 +3217,35 @@ export function createPanelHandler(ctx) {
           .map((vm) => vm.id)
         const restored = resumeSchedulableSlots(cfg.paths.project, ids, reason)
         return json(res, 200, panel.ok({ restored: restored.length }))
+      }
+
+      // Stopped Codex account -> Live one-time migration. Admin-only by panel ACL.
+      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/live-migration\/prepare$/.test(p)) {
+        const id = p.split('/')[4]
+        const body = await readBody(req, 1024)
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) {
+          return migrationError(res, new LiveAccountMigrationError('live_migration_invalid_request', 400))
+        }
+        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
+        try {
+          return await withVmLock(vmPath, async () => json(res, 201, panel.ok(accountMigration().prepare(id))))
+        } catch (error) { return migrationError(res, error) }
+      }
+      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/live-migration$/.test(p)) {
+        const id = p.split('/')[4]
+        try { return json(res, 200, panel.ok(accountMigration().status(id))) }
+        catch (error) { return migrationError(res, error) }
+      }
+      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/live-migration\/upload$/.test(p)) {
+        const id = p.split('/')[4]
+        const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
+        let body
+        try { body = await readBody(req, 4096) }
+        catch (error) { throw error }
+        try {
+          return await withVmLock(vmPath, async () => json(res, 200,
+            panel.ok(await accountMigration().upload(id, body, { signal: req.signal }))))
+        } catch (error) { return migrationError(res, error) }
       }
 
       // POST /api/panel/vms/:id/schedulable — sub2api-style schedule toggle
