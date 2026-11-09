@@ -169,6 +169,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     reset_credits: codex?.reset_credits || null,
     codex_credits: codex?.credits || null,
     codex_window_probe_verified: vm.codex?.window_probe_verified === true,
+    codex_limited_until: vm.codex?.extra?.codex_limited_until || null,
     plan_type: codex?.plan_type || null,
     chatgpt_subscription_active_until: kind.kind === 'codex' ? codex?.chatgpt_subscription_active_until || null : null,
     chatgpt_plan_type: kind.kind === 'codex' ? codex?.chatgpt_plan_type || null : null,
@@ -217,7 +218,7 @@ export function persistCodexUsage(
   vm.codex = { ...(vm.codex || {}) }
   const fromHeaders = extraFromCodexHeaders(headers || {}, now)
   const cached = { ...(vm.codex.extra || {}) }
-  if (quotaExceeded || limitedUntil) delete vm.codex.window_probe_verified
+  if (quotaExceeded) delete vm.codex.window_probe_verified
   if (quotaExceeded) {
     // The error proves exhaustion, not which window or its percentage. Drop
     // cached below-cap readings (including aliases) instead of inventing 100%.

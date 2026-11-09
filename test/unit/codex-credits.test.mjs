@@ -339,3 +339,12 @@ test('actual upstream quota refusal revokes verified-window recovery', async (t)
   assert.equal(getVm(root, 'vm-a').codex.window_probe_verified, undefined)
   assert.equal(isCodexSlotParked(listVms(root)[0]), true)
 })
+
+test('transient 429 keeps verification and uses a short hold despite 100% headers', async (t) => {
+  const root = fixture(t, { extra: WEEK_SPENT, window_probe_verified: true })
+  await hop(root, { status: 429, code: 'rate_limit_exceeded', headers: WEEK_SPENT_HEADERS })
+  const vm = getVm(root, 'vm-a')
+  assert.equal(vm.codex.window_probe_verified, true)
+  assert.ok(Date.parse(vm.codex.extra.codex_limited_until) < Date.now() + 3600000)
+  assert.equal(isCodexSlotParked(listVms(root)[0]), true)
+})

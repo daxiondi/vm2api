@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { atomicWriteJson, readJsonCached } from './vm-file.mjs'
 import { isCodexVm } from '../protocol/codex-route.mjs'
-import { buildCodexUsageView, extraToCodexSnapshot, canAttemptCodexBeyondWindow } from '../protocol/codex-usage.mjs'
+import { buildCodexUsageView, extraToCodexSnapshot, hasSpendableCodexCredits } from '../protocol/codex-usage.mjs'
 import { openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
 
 export { isCodexVm }
@@ -317,7 +317,7 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   if (credits) {
     vm.codex.credits = credits
     // A fresh read that credits are spendable supersedes an older park; the next 429 parks again.
-    if (canAttemptCodexBeyondWindow(vm) && vm.codex.extra?.codex_limited_until) {
+    if (hasSpendableCodexCredits(vm) && vm.codex.extra?.codex_limited_until) {
       vm.codex.extra = { ...vm.codex.extra }
       delete vm.codex.extra.codex_limited_until
     }

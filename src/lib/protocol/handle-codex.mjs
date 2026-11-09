@@ -273,9 +273,10 @@ function ingestCodexHop(projectRoot, vmId, result, now = Date.now(), policy = nu
     isCodexFailoverError(result) &&
     (Number(result?.status) === 429 || /usage_limit_reached/.test(String(result?.body?.error?.code || '')))
   ) {
-    const park = extra ? codexQuotaPark(extra, now) : { limited: true, until: now + CODEX_DEFAULT_PARK_MS }
-    limitedUntil = park.until || now + CODEX_DEFAULT_PARK_MS
     quotaExceeded = String(result?.body?.error?.code || result?.error_code || '') === 'usage_limit_reached'
+    // A transient 429 must not turn a passive 100% header into a week-long ban.
+    const park = quotaExceeded && extra ? codexQuotaPark(extra, now) : null
+    limitedUntil = park?.until || now + CODEX_DEFAULT_PARK_MS
   }
   if (!extra && !limitedUntil && !codexCreditsFromHeaders(headers, now)) return null
   return persistCodexUsage(projectRoot, vmId, { headers, extra, limitedUntil, quotaExceeded, now, policy })
