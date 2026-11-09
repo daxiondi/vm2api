@@ -311,3 +311,31 @@ test('credit-only reply headers refresh the reading', async (t) => {
   assert.equal(summary.codex_credits.unlimited, true)
   assert.equal(summary.codex_credits.has_credits, false)
 })
+
+test('verified zero-credit slot keeps truthful usage and survives quota refresh', (t) => {
+  const root = fixture(t, {
+    extra: WEEK_SPENT,
+    window_probe_verified: true,
+    credits: credits({ has_credits: false, balance: '0' }),
+  })
+  const full = getVm(root, 'vm-a')
+  assert.equal(hasSpendableCodexCredits(full, NOW), false)
+  assert.equal(evaluateOpenAIQuotaGate(full, {}, NOW).limited, false)
+  const summary = listVms(root)[0]
+  assert.equal(summary.codex_window_probe_verified, true)
+  assert.equal(isCodexSlotParked(summary, NOW), false)
+  assert.equal(codexQuotaWindowReason(summary, NOW), null)
+  persistCodexQuotaSnapshot(root, 'vm-a', { extra: WEEK_SPENT })
+  const refreshed = getVm(root, 'vm-a')
+  assert.equal(refreshed.codex.extra.codex_primary_used_percent, 100)
+  assert.equal(refreshed.codex.credits.balance, '0')
+  assert.equal(refreshed.codex.window_probe_verified, true)
+  assert.equal(refreshed.codex.extra.codex_limited_until, undefined)
+})
+
+test('actual upstream quota refusal revokes verified-window recovery', async (t) => {
+  const root = fixture(t, { extra: WEEK_SPENT, window_probe_verified: true })
+  await hop(root, { status: 429, headers: WEEK_SPENT_HEADERS })
+  assert.equal(getVm(root, 'vm-a').codex.window_probe_verified, undefined)
+  assert.equal(isCodexSlotParked(listVms(root)[0]), true)
+})

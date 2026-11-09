@@ -151,6 +151,15 @@ export function hasSpendableCodexCredits(vm, now = Date.now()) {
   return credits.unlimited === true || credits.has_credits === true
 }
 
+/** Operator verification waives passive percentages, never an explicit upstream refusal. */
+export function canAttemptCodexBeyondWindow(vm, now = Date.now()) {
+  return (
+    hasSpendableCodexCredits(vm, now) ||
+    vm?.codex?.window_probe_verified === true ||
+    vm?.codex_window_probe_verified === true
+  )
+}
+
 function lowerHeaders(headers) {
   if (!headers || typeof headers !== 'object') return null
   const out = {}

@@ -8,7 +8,7 @@ import {
   extraToCodexSnapshot,
   normalizeCodexLimits,
   codexQuotaPark,
-  hasSpendableCodexCredits,
+  canAttemptCodexBeyondWindow,
 } from '../protocol/codex-usage.mjs'
 import { isLeftoverQuotaScheduleOff, isQuotaWindowReason } from './availability.mjs'
 import { orderOpenAIAccounts } from './openai-account-selector.mjs'
@@ -34,8 +34,8 @@ function isLiveMigrationDrain(vm) {
 export function isCodexSlotReady(vm, now = Date.now(), { allowMigrationDrain = false } = {}) {
   if (!vm || !isCodexVm(vm)) return false
   if (proxyBlockedReason(vm.proxy)) return false
-  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)
-    && !(allowMigrationDrain && isLiveMigrationDrain(vm))) return false
+  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm) && !(allowMigrationDrain && isLiveMigrationDrain(vm)))
+    return false
   if (!vm.has_token) return false
   // An expired access token with no refresh token can never succeed: the
   // kernel has nothing to rotate and every hop answers 401.
@@ -53,7 +53,7 @@ export function isCodexSlotParked(vm, now = Date.now(), policy = null) {
 }
 
 function extraPark(vm, now) {
-  return codexQuotaPark(extraFromSummary(vm), now, { waiveWindowCaps: hasSpendableCodexCredits(vm, now) })
+  return codexQuotaPark(extraFromSummary(vm), now, { waiveWindowCaps: canAttemptCodexBeyondWindow(vm, now) })
 }
 
 function extraFromSummary(vm) {
@@ -100,9 +100,10 @@ function parkUntil(vm, now) {
  * Ready slots first (lowest 5h/7d stress), parked slots last so a
  * total-exhaust pool still has somewhere to fail instead of 503.
  */
-export function pickCodexSlots(vms, {
-  pin = null, boundVmId = null, now = Date.now(), quotaPolicy = null, model = null,
-} = {}) {
+export function pickCodexSlots(
+  vms,
+  { pin = null, boundVmId = null, now = Date.now(), quotaPolicy = null, model = null } = {},
+) {
   const list = Array.isArray(vms) ? vms : []
   if (pin) {
     const vm = list.find((item) => item?.id === pin) || null
@@ -182,8 +183,8 @@ function quotaResetAt(vm) {
 export function codexAccountStatus(vm, now = Date.now(), policy = null, { allowMigrationDrain = false } = {}) {
   if (!vm || !isCodexVm(vm)) return 'error'
   if (proxyBlockedReason(vm.proxy)) return 'disabled'
-  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)
-    && !(allowMigrationDrain && isLiveMigrationDrain(vm))) return 'disabled'
+  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm) && !(allowMigrationDrain && isLiveMigrationDrain(vm)))
+    return 'disabled'
   const status = String(vm.status || '').toLowerCase()
   if (status === 'disabled') return 'disabled'
   if (status === 'dead' || status === 'error') return 'error'
@@ -199,8 +200,13 @@ export function codexSlotAllowsModel(vm, model) {
   return modelMatchesAllowlist(model, vm?.allowed_models ?? vm?.policy?.allowed_models)
 }
 
-export function codexAccountCandidate(vm, now = Date.now(), signals = null, policy = null,
-  { allowMigrationDrain = false } = {}) {
+export function codexAccountCandidate(
+  vm,
+  now = Date.now(),
+  signals = null,
+  policy = null,
+  { allowMigrationDrain = false } = {},
+) {
   const runtime = signals || openAIRuntimeSignals(vm?.id, now)
   const effective = effectiveOpenAIPolicy(vm, normalizeOpenAIQuotaPolicy(policy))
   return {
@@ -269,14 +275,17 @@ export function orderCodexSessionSlots(
       ...picked,
       ids: pool,
       sticky: false,
-      candidates: pool.map((id) => codexAccountCandidate(byId.get(id), now, null, policy,
-        { allowMigrationDrain: id === boundVmId })),
+      candidates: pool.map((id) =>
+        codexAccountCandidate(byId.get(id), now, null, policy, { allowMigrationDrain: id === boundVmId }),
+      ),
     }
   }
-  const home = boundVmId && pool.includes(boundVmId)
-    && codexAccountStatus(byId.get(boundVmId), now, policy, { allowMigrationDrain: true }) === 'normal'
-    ? boundVmId
-    : null
+  const home =
+    boundVmId &&
+    pool.includes(boundVmId) &&
+    codexAccountStatus(byId.get(boundVmId), now, policy, { allowMigrationDrain: true }) === 'normal'
+      ? boundVmId
+      : null
   const boundState = boundVmId
     ? home
       ? 'live'
@@ -298,8 +307,9 @@ export function orderCodexSessionSlots(
     return { error: 'session_window_full', ids: [], ready: [], parked: [], sticky: false, boundState, candidates: [] }
   }
   const cursor = roundRobinCursor == null ? readOpenAICursor() : roundRobinCursor
-  const candidates = ids.map((id) => codexAccountCandidate(byId.get(id), now, null, policy,
-    { allowMigrationDrain: id === boundVmId }))
+  const candidates = ids.map((id) =>
+    codexAccountCandidate(byId.get(id), now, null, policy, { allowMigrationDrain: id === boundVmId }),
+  )
   const ordered = orderOpenAIAccounts(candidates, {
     strategy,
     now,
@@ -309,8 +319,9 @@ export function orderCodexSessionSlots(
     roundRobinCursor: cursor,
   })
   if (!ordered.ids.length) {
-    const statuses = ids.map((id) => codexAccountStatus(byId.get(id), now, policy,
-      { allowMigrationDrain: id === boundVmId }))
+    const statuses = ids.map((id) =>
+      codexAccountStatus(byId.get(id), now, policy, { allowMigrationDrain: id === boundVmId }),
+    )
     const quotaExhausted = statuses.length > 0 && statuses.every((status) => status === 'quota_exhausted')
     const retryAt = quotaExhausted ? null : rpmRetryAt(candidates, now) || holdRetryAt(candidates, now)
     return {
@@ -409,7 +420,7 @@ export function isCodexFailoverError(result) {
 
 export function codexQuotaWindowReason(vm, now = Date.now()) {
   const extra = extraFromSummary(vm)
-  const waived = hasSpendableCodexCredits(vm, now)
+  const waived = canAttemptCodexBeyondWindow(vm, now)
   const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
   const used5 = Number(limits.used_5h_percent)
   const used7 = Number(limits.used_7d_percent)
@@ -426,7 +437,7 @@ export function codexQuotaWindowReason(vm, now = Date.now()) {
 function codexRestrictionUntil(vm, now) {
   const extra = extraFromSummary(vm)
   const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
-  const windowResets = hasSpendableCodexCredits(vm, now) ? [] : [limits.reset_5h_at, limits.reset_7d_at]
+  const windowResets = canAttemptCodexBeyondWindow(vm, now) ? [] : [limits.reset_5h_at, limits.reset_7d_at]
   const futures = [...windowResets, extra.codex_limited_until]
     .map((value) => Date.parse(value || ''))
     .filter((value) => Number.isFinite(value) && value > now)
